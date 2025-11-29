@@ -1,28 +1,206 @@
-<!DOCTYPE html>
-<html lang="sv">
-<head>
-  <meta charset="UTF-8">
-  <title>StartaAI Gratis</title>
-</head>
-<body>
-<h1>StartaAI – Gratis AI för startups</h1>
-<textarea id="prompt" rows="4" cols="50" placeholder="Skriv din prompt här..."></textarea><br>
-<button onclick="generate()">Generera</button>
-<pre id="output"></pre>
+startaai/
+├─ backend/
+│  ├─ app/
+│  │  ├─ main.py
+│  │  ├─ models.py
+│  │  ├─ schemas.py
+│  │  ├─ auth.py
+│  │  ├─ db.py
+│  │  ├─ pii.py
+│  │  ├─ generator.py
+│  │  └─ config.py
+│  ├─ requirements.txt
+│  ├─ Dockerfile
+│  └─ .env.example
+├─ frontend/
+│  └─ index.html
+└─ README.md
+from pydantic import BaseSettings
 
-<script>
-async function generate() {
-    const prompt = document.getElementById("prompt").value;
-    const response = await fetch("http://DIN_BACKEND_URL/generate/guest", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({prompt: prompt, include_image: false})
-    });
-    const data = await response.json();
-    document.getElementById("output").textContent = data.text;
+class Settings(BaseSettings):
+    SECRET_KEY: str
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60*24
+    DATABASE_URL: str = "sqlite:///./startaai.db"
+
+    class Config:
+        env_file = "../.env"
+        env_file_encoding = "utf-8"
+
+settings = Settings()
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+from .config import settings
+
+engine = create_engine(settings.DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text
+from sqlalchemy.sql import func
+from .db import Base
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    password_hash = Column(String)
+    created_at = Column(DateTime, server_default=func.now())
+
+class Generation(Base):
+    __tablename__ = "generations"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=True)
+    type = Column(String, default="text")
+    prompt = Column(Text)
+    result = Column(Text)
+    is_uncertain = Column(Boolean, default=False)
+    created_at = Column(DateTime, server_default=func.now())
+from pydantic import BaseModel, EmailStr
+from typing import Optional
+
+class RegisterIn(BaseModel):
+    email: EmailStr
+    password: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str
+
+class GenerateIn(BaseModel):
+    prompt: str
+    language: Optional[str] = "sv"
+    length_pref: Optional[str] = None
+    include_image: Optional[bool] = False
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+from jose import jwt
+from .config import settings
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+ALGORITHM = "HS256"
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
+
+def decode_token(token: str):
+    from jose import JWTError
+    try:
+        return jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+import re
+
+PII_PATTERNS = {
+    "email": re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"),
+    "phone": re.compile(r"\+?\d[\d\s\-]{6,}\d")
 }
-</script>
-</body>
-</html>
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 10000
+
+def anonymize_text(text: str) -> tuple[str, dict]:
+    flags = {}
+    out = text
+    for key, pat in PII_PATTERNS.items():
+        matches = pat.findall(out)
+        if matches:
+            flags[key] = len(matches)
+            out = pat.sub(f"<{key.upper()}>", out)
+    return out, flags
+import time
+from typing import Tuple
+
+def generate_text(prompt: str, language: str = "sv", length_pref: str | None = None) -> Tuple[str, bool]:
+    time.sleep(1)
+    is_uncertain = any(w in prompt.lower() for w in ["kanske", "osäker"])
+    text = f"StartaAI (exempel) — Genererat svar på prompten: {prompt[:300]}\n\nFörslag: ..."
+    return text, is_uncertain
+
+def generate_image(prompt: str, style: str = "realistic_clean") -> str:
+    time.sleep(1.5)
+    return "https://via.placeholder.com/1024x512.png?text=StartaAI+bild+exempel"
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+from .db import get_db, engine
+from . import models, schemas, auth, pii, generator
+from .models import User, Generation
+import uvicorn
+
+models.Base.metadata.create_all(bind=engine)
+app = FastAPI(title="StartaAI Gratis")
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+def get_user_by_email(db: Session, email: str):
+    return db.query(User).filter(User.email == email).first()
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = auth.decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Ogiltig token")
+    user = db.query(User).get(payload.get("sub"))
+    if not user:
+        raise HTTPException(status_code=404, detail="Användare finns ej")
+    return user
+
+@app.post("/register")
+def register(payload: schemas.RegisterIn, db: Session = Depends(get_db)):
+    if get_user_by_email(db, payload.email):
+        raise HTTPException(status_code=400, detail="Email används redan")
+    hashed = auth.hash_password(payload.password)
+    user = User(email=payload.email, password_hash=hashed)
+    db.add(user); db.commit(); db.refresh(user)
+    token = auth.create_access_token({"sub": user.id})
+    return {"access_token": token, "token_type": "bearer"}
+
+@app.post("/login")
+def login(payload: schemas.LoginIn, db: Session = Depends(get_db)):
+    user = get_user_by_email(db, payload.email)
+    if not user or not auth.verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Fel email eller lösenord")
+    token = auth.create_access_token({"sub": user.id})
+    return {"access_token": token, "token_type": "bearer"}
+
+@app.post("/generate/guest")
+def generate_guest(payload: schemas.GenerateIn):
+    prompt, flags = pii.anonymize_text(payload.prompt)
+    text, is_uncertain = generator.generate_text(prompt, language=payload.language, length_pref=payload.length_pref)
+    resp = {"text": text, "is_uncertain": is_uncertain, "pii_flags": flags}
+    if payload.include_image:
+        resp["image_url"] = generator.generate_image(prompt)
+    return resp
+
+if __name__ == "__main__":
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+fastapi==0.95.2
+uvicorn[standard]==0.22.0
+sqlalchemy==1.4.50
+pydantic==1.10.9
+python-jose==3.3.0
+passlib[bcrypt]==1.7.5
+python-multipart==0.0.6
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app /app/app
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
