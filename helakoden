@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8">
+  <title>StartaAI Gratis</title>
+</head>
+<body>
+<h1>StartaAI – Gratis AI för startups</h1>
+<textarea id="prompt" rows="4" cols="50" placeholder="Skriv din prompt här..."></textarea><br>
+<button onclick="generate()">Generera</button>
+<pre id="output"></pre>
+
+<script>
+async function generate() {
+    const prompt = document.getElementById("prompt").value;
+    const response = await fetch("http://DIN_BACKEND_URL/generate/guest", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({prompt: prompt, include_image: false})
+    });
+    const data = await response.json();
+    document.getElementById("output").textContent = data.text;
+}
+</script>
+</body>
+</html>
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 10000
